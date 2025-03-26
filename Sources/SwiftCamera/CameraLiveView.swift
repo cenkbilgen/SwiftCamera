@@ -9,15 +9,15 @@ import SwiftUI
 import UIKit
 import AVFoundation
 
-public struct CameraPreviewView: UIViewRepresentable {
+public struct CameraLiveView: UIViewRepresentable {
     @ObservedObject var model: CameraModel
     
     public init(model: CameraModel) {
         self.model = model
     }
     
-    public func makeUIView(context: Context) -> UIView {
-        let view = PreviewView()
+    public func makeUIView(context: Context) -> CameraPreviewUIView {
+        let view = CameraPreviewUIView()
         let layer = AVCaptureVideoPreviewLayer(session: model.session)
         layer.videoGravity = .resizeAspectFill
         view.previewLayer = layer
@@ -25,12 +25,12 @@ public struct CameraPreviewView: UIViewRepresentable {
         return view
     }
     
-    public func updateUIView(_ uiView: UIView, context: Context) {}
+    public func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {}
     
-    class PreviewView: UIView {
+    public class CameraPreviewUIView: UIView {
         // subclassed UIView, this so that it can resize on layout more efficiently
         var previewLayer: AVCaptureVideoPreviewLayer?
-        override func layoutSubviews() {
+        public override func layoutSubviews() {
             super.layoutSubviews()
             previewLayer?.frame = bounds
         }
