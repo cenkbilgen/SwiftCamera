@@ -6,14 +6,22 @@
 //
 
 import AVFoundation
+import VideoToolbox
 import Observation
 
+public struct CameraSample: @unchecked Sendable {
+    public let buffer: CVPixelBuffer // not Sendable, must manually handle potential race condition
+    public let timeStamp: CMTime
+}
 
 @Observable
-final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
+final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
     let session = AVCaptureSession()
-    private var photoOutput = AVCapturePhotoOutput()
-    private var photoContinuation: CheckedContinuation<Data, Error>?
+    private var photoOutput: AVCapturePhotoOutput?
+    private var videoOutput: AVCaptureVideoDataOutput?
+    
+    private var pixelBufferPool: CVPixelBufferPool?
+    private var dataContinuation: CheckedContinuation<CameraSample, Error>?
     
     private var preferredCameraDevice: AVCaptureDevice? {
         AVCaptureDevice.systemPreferredCamera
@@ -58,46 +66,239 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     }
     
     // TODO: just camera hard-coded for now
-    public func setOutputDevice() throws {
+    public enum OutputType {
+        case photo
+        case video(fps: Double, resolution: AVCaptureSession.Preset)
+        // case audio
+    }
+
+    public func setOutputDevice(type: OutputType) throws {
         session.beginConfiguration()
         defer {
             session.commitConfiguration()
         }
-        let output = photoOutput // TODO
-        guard session.canAddOutput(output) else {
-            throw CameraError.invalidOutputDevice(output.debugDescription)
+        
+        switch type {
+        case .photo:
+            let output = AVCapturePhotoOutput()
+            guard session.canAddOutput(output) else {
+                throw CameraError.invalidOutputDevice(output.debugDescription)
+            }
+            self.videoOutput = nil
+            self.photoOutput = output
+            session.addOutput(output)
+            
+        case .video(let fps, let resolution):
+            session.sessionPreset = resolution
+            let output = AVCaptureVideoDataOutput()
+            output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)]
+            output.alwaysDiscardsLateVideoFrames = true
+            if let device = session.inputs.first as? AVCaptureDeviceInput {
+                try device.device.lockForConfiguration()
+                device.device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
+                device.device.unlockForConfiguration()
+            }
+            guard session.canAddOutput(output) else {
+                throw CameraError.invalidOutputDevice(videoOutput.debugDescription)
+            }
+            self.photoOutput = nil
+            self.videoOutput = output
+            session.addOutput(output)
+            
+//        case .audio:
+//            let audioOutput = AVCaptureAudioDataOutput()
+//            guard session.canAddOutput(audioOutput) else {
+//                throw CameraError.invalidOutputDevice(audioOutput.debugDescription)
+//            }
+//            session.addOutput(audioOutput)
         }
-        session.addOutput(output)
     }
     
-    @MainActor public func start() {
-        session.startRunning()
+    // MARK: Start and Stop
+    
+    public func start() {
+        queue.async { [weak self] in
+            self?.session.startRunning()
+        }
     }
     
-    @MainActor public func stop() {
-        session.stopRunning()
+    public func stop() {
+        queue.async { [weak self] in
+            self?.session.stopRunning()
+        }
     }
     
-    public func capturePhoto() async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            self.photoContinuation = continuation
+    // MARK: Capture Photos
+    
+    public func capturePhoto() async throws -> CameraSample {
+        guard let photoOutput else {
+            throw CameraError.notCurrentCaptureOutputDevice
+        }
+        return try await withCheckedThrowingContinuation { [photoOutput] continuation in
+            self.dataContinuation = continuation
             let settings = AVCapturePhotoSettings()
-            self.photoOutput.capturePhoto(with: settings, delegate: self)
+            photoOutput.capturePhoto(with: settings, delegate: self)
         }
     }
     
     public func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         if let error {
-            photoContinuation?.resume(throwing: error)
+            dataContinuation?.resume(throwing: error)
             return
         }
-        
-        guard let imageData = photo.fileDataRepresentation() else {
-            photoContinuation?.resume(throwing: CameraError.noImageData)
+        guard let pixelBuffer = photo.pixelBuffer else {
+            dataContinuation?.resume(throwing: CameraError.noImageData)
             return
         }
-        photoContinuation?.resume(returning: imageData)
-        photoContinuation = nil
+        let cameraSample = CameraSample(buffer: pixelBuffer, timeStamp: photo.timestamp)
+        dataContinuation?.resume(returning: cameraSample)
+        dataContinuation = nil
     }
+    
+    // MARK: Capture Video
+    
+    let queue = DispatchQueue(label: "VideoSampeBufferQueue.SwiftCamera")
+    
+    public func startCaptureVideo() async throws -> CameraSample {
+        guard let videoOutput else {
+            throw CameraError.notCurrentCaptureOutputDevice
+        }
+        return try await withCheckedThrowingContinuation { [videoOutput] continuation in
+            self.dataContinuation = continuation
+            videoOutput.setSampleBufferDelegate(self, queue: queue)
+        }
+    }
+    
+    public func stopCaptureVideo() {
+        videoOutput?.setSampleBufferDelegate(nil, queue: queue)
+        self.dataContinuation = nil
+    }
+    
+    public var isCapturingVideo: Bool {
+        videoOutput?.sampleBufferDelegate != nil
+    }
+    
+    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        do {
+            guard let pixelBuffer = sampleBuffer.imageBuffer else {
+                throw CameraError.noVideoFrame
+            }
+            if pixelBufferPool == nil {
+                try setupPixelBufferPool(prototypeBuffer: pixelBuffer, pool: &pixelBufferPool)
+            }
+            var pixelBufferCopy: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool!, &pixelBufferCopy)
+            guard let pixelBufferCopy else {
+                throw CameraError.noVideoFrame
+            }
+            
+           // OSMemoryBarrier()
+            // Copy content from the original buffer to the new one
+//            CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+//            CVPixelBufferLockBaseAddress(pixelBufferCopy, [])
+            
+            // Perform the copy
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            
+            if let srcAddress = CVPixelBufferGetBaseAddress(pixelBuffer),
+               let destAddress = CVPixelBufferGetBaseAddress(pixelBufferCopy) {
+                memcpy(destAddress, srcAddress, bytesPerRow * height)
+            }
+            
+//            CVPixelBufferUnlockBaseAddress(pixelBufferCopy, [])
+//            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
+            
+            let cameraSample = CameraSample(buffer: pixelBufferCopy, timeStamp: sampleBuffer.presentationTimeStamp)
+            dataContinuation?.resume(returning: cameraSample)
+
+        } catch {
+            dataContinuation?.resume(throwing: CameraError.noVideoFrame)
+        }
+    }
+    
+    public func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        print("Dropping samples")
+    }
+    
+    func setupPixelBufferPool(prototypeBuffer buffer: CVImageBuffer, pool: UnsafeMutablePointer<CVPixelBufferPool?>) throws {
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        let pixelFormat = CVPixelBufferGetPixelFormatType(buffer)
+        
+        let poolAttributes: [String: Any] = [
+            kCVPixelBufferPoolMinimumBufferCountKey as String: 3
+        ]
+        
+        let pixelBufferAttributes: [String: Any] = [
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ]
+        
+        let rc = CVPixelBufferPoolCreate(
+            kCFAllocatorDefault,
+            poolAttributes as CFDictionary,
+            pixelBufferAttributes as CFDictionary,
+            pool
+        )
+        
+        guard rc == kCVReturnSuccess else {
+            throw CameraError.bufferPoolSetupFailed(rc)
+        }
+    }
+    
 }
 
+enum ImageTool {
+    
+    enum Error: Swift.Error {
+        case conversionFailed
+    }
+    
+    static func cgImage(from buffer: CVPixelBuffer) throws -> CGImage {
+       var cgImage: CGImage?
+       VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &cgImage)
+       guard let cgImage else {
+         throw Error.conversionFailed
+       }
+       return cgImage
+     }
+
+    static func imageToData(from cgImage: CGImage,
+                     format: UTType = .jpeg,
+                     quality: CGFloat = 0.8,
+                     metadata: [String: Any]? = nil) -> Data? {
+        
+        let data = NSMutableData()
+        
+        guard let destination = CGImageDestinationCreateWithData(data as CFMutableData, format.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        
+        let options: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: quality,
+            kCGImageDestinationOptimizeColorForSharing: true
+        ]
+        
+        if let metadata = metadata {
+            let mutableMetadata = CGImageMetadataCreateMutable()
+            // Add metadata here if needed
+            CGImageDestinationAddImageAndMetadata(
+                destination,
+                cgImage,
+                mutableMetadata,
+                options as CFDictionary
+            )
+        } else {
+            CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
+        }
+        
+        guard CGImageDestinationFinalize(destination) else {
+            return nil
+        }
+        
+        return data as Data
+    }
+}
