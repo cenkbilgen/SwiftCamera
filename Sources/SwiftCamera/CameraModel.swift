@@ -9,10 +9,10 @@ import AVFoundation
 import VideoToolbox
 import Observation
 
-public struct CameraSample: @unchecked Sendable {
-    public let buffer: CVPixelBuffer // not Sendable, must manually handle potential race condition
-    public let timeStamp: CMTime
-}
+//public struct CameraSample: @unchecked Sendable {
+//    public let buffer: CVPixelBuffer // not Sendable, must manually handle potential race condition
+//    public let timeStamp: CMTime
+//}
 
 final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable, AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
     let session = AVCaptureSession()
@@ -21,6 +21,7 @@ final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable,
     
     private var pixelBufferPool: CVPixelBufferPool?
     private var dataContinuation: CheckedContinuation<Data, Error>?
+    private var sampleContinuation: CheckedContinuation<CMSampleBuffer, Error>?
     
     private var preferredCameraDevice: AVCaptureDevice? {
         AVCaptureDevice.systemPreferredCamera
@@ -129,13 +130,16 @@ final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable,
     
     // MARK: Capture Photos
     
-    public func capturePhoto() async throws -> Data {
+    public func capturePhoto(type: AVVideoCodecType? = .jpeg) async throws -> Data {
         guard let photoOutput else {
             throw CameraError.notCurrentCaptureOutputDevice
         }
         return try await withCheckedThrowingContinuation { [photoOutput] continuation in
             self.dataContinuation = continuation
-            let settings = AVCapturePhotoSettings()
+            let format: [String: Any] = [
+                AVVideoCodecKey: type
+            ]
+            let settings = AVCapturePhotoSettings(format: format)
             photoOutput.capturePhoto(with: settings, delegate: self)
         }
     }
@@ -149,7 +153,6 @@ final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable,
             dataContinuation?.resume(throwing: CameraError.noImageData)
             return
         }
-//        let cameraSample = CameraSample(buffer: pixelBuffer, timeStamp: photo.timestamp)
         dataContinuation?.resume(returning: data)
         dataContinuation = nil
     }
