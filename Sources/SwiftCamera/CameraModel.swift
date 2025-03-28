@@ -14,14 +14,13 @@ public struct CameraSample: @unchecked Sendable {
     public let timeStamp: CMTime
 }
 
-@Observable
-final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
+final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable, AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
     let session = AVCaptureSession()
     private var photoOutput: AVCapturePhotoOutput?
     private var videoOutput: AVCaptureVideoDataOutput?
     
     private var pixelBufferPool: CVPixelBufferPool?
-    private var dataContinuation: CheckedContinuation<CameraSample, Error>?
+    private var dataContinuation: CheckedContinuation<Data, Error>?
     
     private var preferredCameraDevice: AVCaptureDevice? {
         AVCaptureDevice.systemPreferredCamera
@@ -130,7 +129,7 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     
     // MARK: Capture Photos
     
-    public func capturePhoto() async throws -> CameraSample {
+    public func capturePhoto() async throws -> Data {
         guard let photoOutput else {
             throw CameraError.notCurrentCaptureOutputDevice
         }
@@ -146,12 +145,12 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
             dataContinuation?.resume(throwing: error)
             return
         }
-        guard let pixelBuffer = photo.pixelBuffer else {
+        guard let data = photo.fileDataRepresentation() else {
             dataContinuation?.resume(throwing: CameraError.noImageData)
             return
         }
-        let cameraSample = CameraSample(buffer: pixelBuffer, timeStamp: photo.timestamp)
-        dataContinuation?.resume(returning: cameraSample)
+//        let cameraSample = CameraSample(buffer: pixelBuffer, timeStamp: photo.timestamp)
+        dataContinuation?.resume(returning: data)
         dataContinuation = nil
     }
     
@@ -159,7 +158,7 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     
     let queue = DispatchQueue(label: "VideoSampeBufferQueue.SwiftCamera")
     
-    public func startCaptureVideo() async throws -> CameraSample {
+    public func startCaptureVideo() async throws -> Data {
         guard let videoOutput else {
             throw CameraError.notCurrentCaptureOutputDevice
         }
@@ -198,20 +197,23 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
 //            CVPixelBufferLockBaseAddress(pixelBufferCopy, [])
             
             // Perform the copy
-            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-            let height = CVPixelBufferGetHeight(pixelBuffer)
-            
-            if let srcAddress = CVPixelBufferGetBaseAddress(pixelBuffer),
-               let destAddress = CVPixelBufferGetBaseAddress(pixelBufferCopy) {
-                memcpy(destAddress, srcAddress, bytesPerRow * height)
-            }
-            
-//            CVPixelBufferUnlockBaseAddress(pixelBufferCopy, [])
-//            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
-            
-            let cameraSample = CameraSample(buffer: pixelBufferCopy, timeStamp: sampleBuffer.presentationTimeStamp)
-            dataContinuation?.resume(returning: cameraSample)
-
+//            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+//            let height = CVPixelBufferGetHeight(pixelBuffer)
+//            
+//            if let srcAddress = CVPixelBufferGetBaseAddress(pixelBuffer),
+//               let destAddress = CVPixelBufferGetBaseAddress(pixelBufferCopy) {
+//                memcpy(destAddress, srcAddress, bytesPerRow * height)
+//            }
+//            
+////            CVPixelBufferUnlockBaseAddress(pixelBufferCopy, [])
+////            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
+//            
+//            let cameraSample = CameraSample(buffer: pixelBufferCopy, timeStamp: sampleBuffer.presentationTimeStamp)
+            CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+            var image: CGImage?
+            VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &image)
+            // TODO: Conver to Data
+            dataContinuation?.resume(returning: Data())
         } catch {
             dataContinuation?.resume(throwing: CameraError.noVideoFrame)
         }
@@ -220,7 +222,7 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     public func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         print("Dropping samples")
     }
-    
+
     func setupPixelBufferPool(prototypeBuffer buffer: CVImageBuffer, pool: UnsafeMutablePointer<CVPixelBufferPool?>) throws {
         let width = CVPixelBufferGetWidth(buffer)
         let height = CVPixelBufferGetHeight(buffer)
@@ -265,40 +267,4 @@ enum ImageTool {
        }
        return cgImage
      }
-
-    static func imageToData(from cgImage: CGImage,
-                     format: UTType = .jpeg,
-                     quality: CGFloat = 0.8,
-                     metadata: [String: Any]? = nil) -> Data? {
-        
-        let data = NSMutableData()
-        
-        guard let destination = CGImageDestinationCreateWithData(data as CFMutableData, format.identifier as CFString, 1, nil) else {
-            return nil
-        }
-        
-        let options: [CFString: Any] = [
-            kCGImageDestinationLossyCompressionQuality: quality,
-            kCGImageDestinationOptimizeColorForSharing: true
-        ]
-        
-        if let metadata = metadata {
-            let mutableMetadata = CGImageMetadataCreateMutable()
-            // Add metadata here if needed
-            CGImageDestinationAddImageAndMetadata(
-                destination,
-                cgImage,
-                mutableMetadata,
-                options as CFDictionary
-            )
-        } else {
-            CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
-        }
-        
-        guard CGImageDestinationFinalize(destination) else {
-            return nil
-        }
-        
-        return data as Data
-    }
 }

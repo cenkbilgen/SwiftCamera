@@ -20,7 +20,7 @@ public struct CameraLiveView: UIViewRepresentable {
         let view = CameraPreviewUIView()
         let layer = AVCaptureVideoPreviewLayer(session: model.session)
         layer.videoGravity = .resizeAspectFill
-        layer.backgroundColor = CGColor(red: 0.5, green: 0.1, blue: 0.1, alpha: 1)
+        layer.backgroundColor = CGColor(red: 0.2, green: 0.2, blue: 0.2, alpha: 1)
         view.previewLayer = layer
         view.layer.addSublayer(layer)
         return view
