@@ -5,7 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "SwiftCamera",
-    platforms: [.iOS(.v17)],
+    platforms: [.iOS(.v17), .macOS(.v15)],
     products: [
         .library(
             name: "SwiftCamera",

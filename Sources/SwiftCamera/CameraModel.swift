@@ -33,12 +33,18 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     @Published public var currentPosition: CameraPosition?
     
     public enum CameraType {
-        case wide, lidar, ultraWide
+        case wide
+#if os(iOS)
+        case lidar
+        case ultraWide
+#endif
         var captureDeviceType: AVCaptureDevice.DeviceType {
             switch self {
             case .wide: .builtInWideAngleCamera
+#if os(iOS)
             case .lidar: .builtInLiDARDepthCamera
             case .ultraWide: .builtInUltraWideCamera
+#endif
             }
         }
     }
