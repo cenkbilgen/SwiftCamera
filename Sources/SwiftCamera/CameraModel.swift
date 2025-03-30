@@ -7,21 +7,15 @@
 
 import AVFoundation
 import VideoToolbox
-import Observation
 
-//public struct CameraSample: @unchecked Sendable {
-//    public let buffer: CVPixelBuffer // not Sendable, must manually handle potential race condition
-//    public let timeStamp: CMTime
-//}
-
-final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable, AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
+final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     let session = AVCaptureSession()
     private var photoOutput: AVCapturePhotoOutput?
     private var videoOutput: AVCaptureVideoDataOutput?
     
     private var pixelBufferPool: CVPixelBufferPool?
     private var dataContinuation: CheckedContinuation<Data, Error>?
-    private var sampleContinuation: CheckedContinuation<CMSampleBuffer, Error>?
+    @preconcurrency private var sampleContinuation: AsyncStream<SampleBuffer>.Continuation?
     
     private var preferredCameraDevice: AVCaptureDevice? {
         AVCaptureDevice.systemPreferredCamera
@@ -36,6 +30,7 @@ final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable,
             }
         }
     }
+    @Published public var currentPosition: CameraPosition?
     
     public enum CameraType {
         case wide, lidar, ultraWide
@@ -63,6 +58,7 @@ final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable,
             throw CameraError.invalidInputDevice(videoInput.debugDescription)
         }
         session.addInput(videoInput)
+        self.currentPosition = position
     }
     
     // TODO: just camera hard-coded for now
@@ -71,6 +67,7 @@ final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable,
         case video(fps: Double, resolution: AVCaptureSession.Preset)
         // case audio
     }
+    @Published public var currentOutput: OutputType?
 
     public func setOutputDevice(type: OutputType) throws {
         session.beginConfiguration()
@@ -87,11 +84,11 @@ final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable,
             self.videoOutput = nil
             self.photoOutput = output
             session.addOutput(output)
+            self.currentOutput = .photo
             
         case .video(let fps, let resolution):
             session.sessionPreset = resolution
             let output = AVCaptureVideoDataOutput()
-            output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)]
             output.alwaysDiscardsLateVideoFrames = true
             if let device = session.inputs.first as? AVCaptureDeviceInput {
                 try device.device.lockForConfiguration()
@@ -104,6 +101,7 @@ final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable,
             self.photoOutput = nil
             self.videoOutput = output
             session.addOutput(output)
+            self.currentOutput = .video(fps: fps, resolution: resolution)
             
 //        case .audio:
 //            let audioOutput = AVCaptureAudioDataOutput()
@@ -126,6 +124,10 @@ final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable,
         queue.async { [weak self] in
             self?.session.stopRunning()
         }
+    }
+    
+    public var isRunning: Bool {
+        session.isRunning
     }
     
     // MARK: Capture Photos
@@ -161,98 +163,87 @@ final public class CameraModel: NSObject, ObservableObject, @unchecked Sendable,
     
     let queue = DispatchQueue(label: "VideoSampeBufferQueue.SwiftCamera")
     
-    public func startCaptureVideo() async throws -> Data {
+    public struct SampleBuffer: @unchecked Sendable {
+        public let imageBuffer: CVPixelBuffer
+        public let timestamp: CMTime
+        
+        init(buffer: CMSampleBuffer) throws {
+            try buffer.makeDataReady()
+            guard let imageBuffer = buffer.imageBuffer else {
+                throw AVError(.contentIsUnavailable)
+            }
+            self.imageBuffer = imageBuffer
+            self.timestamp = buffer.presentationTimeStamp
+        }
+    }
+
+    
+    public func startCaptureVideoStream() async throws -> AsyncStream<SampleBuffer> {
         guard let videoOutput else {
             throw CameraError.notCurrentCaptureOutputDevice
         }
-        return try await withCheckedThrowingContinuation { [videoOutput] continuation in
-            self.dataContinuation = continuation
-            videoOutput.setSampleBufferDelegate(self, queue: queue)
-        }
+        videoOutput.setSampleBufferDelegate(self, queue: queue)
+        let (stream, continuation) = AsyncStream<SampleBuffer>.makeStream(bufferingPolicy: .bufferingOldest(1))
+        self.sampleContinuation = continuation
+        return stream
     }
     
-    public func stopCaptureVideo() {
+    public func stopCaptureVideoStream() {
+        self.sampleContinuation?.finish()
         videoOutput?.setSampleBufferDelegate(nil, queue: queue)
-        self.dataContinuation = nil
     }
     
     public var isCapturingVideo: Bool {
         videoOutput?.sampleBufferDelegate != nil
     }
     
-    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        do {
-            guard let pixelBuffer = sampleBuffer.imageBuffer else {
-                throw CameraError.noVideoFrame
-            }
-            if pixelBufferPool == nil {
-                try setupPixelBufferPool(prototypeBuffer: pixelBuffer, pool: &pixelBufferPool)
-            }
-            var pixelBufferCopy: CVPixelBuffer?
-            CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool!, &pixelBufferCopy)
-            guard let pixelBufferCopy else {
-                throw CameraError.noVideoFrame
-            }
-            
-           // OSMemoryBarrier()
-            // Copy content from the original buffer to the new one
-//            CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-//            CVPixelBufferLockBaseAddress(pixelBufferCopy, [])
-            
-            // Perform the copy
-//            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-//            let height = CVPixelBufferGetHeight(pixelBuffer)
-//            
-//            if let srcAddress = CVPixelBufferGetBaseAddress(pixelBuffer),
-//               let destAddress = CVPixelBufferGetBaseAddress(pixelBufferCopy) {
-//                memcpy(destAddress, srcAddress, bytesPerRow * height)
-//            }
-//            
-////            CVPixelBufferUnlockBaseAddress(pixelBufferCopy, [])
-////            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
-//            
-//            let cameraSample = CameraSample(buffer: pixelBufferCopy, timeStamp: sampleBuffer.presentationTimeStamp)
-            CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-            var image: CGImage?
-            VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &image)
-            // TODO: Conver to Data
-            dataContinuation?.resume(returning: Data())
-        } catch {
-            dataContinuation?.resume(throwing: CameraError.noVideoFrame)
+    nonisolated private func handle(buffer: CMSampleBuffer) {
+        guard let sampleContinuation else {
+            return
         }
+        do {
+            let safeBuffer = try SampleBuffer(buffer: buffer)
+            sampleContinuation.yield(safeBuffer)
+        } catch {
+            print(error.localizedDescription)
+        }
+    }
+    
+    nonisolated public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        handle(buffer: sampleBuffer)
     }
     
     public func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         print("Dropping samples")
     }
 
-    func setupPixelBufferPool(prototypeBuffer buffer: CVImageBuffer, pool: UnsafeMutablePointer<CVPixelBufferPool?>) throws {
-        let width = CVPixelBufferGetWidth(buffer)
-        let height = CVPixelBufferGetHeight(buffer)
-        let pixelFormat = CVPixelBufferGetPixelFormatType(buffer)
-        
-        let poolAttributes: [String: Any] = [
-            kCVPixelBufferPoolMinimumBufferCountKey as String: 3
-        ]
-        
-        let pixelBufferAttributes: [String: Any] = [
-            kCVPixelBufferWidthKey as String: width,
-            kCVPixelBufferHeightKey as String: height,
-            kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
-            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
-        ]
-        
-        let rc = CVPixelBufferPoolCreate(
-            kCFAllocatorDefault,
-            poolAttributes as CFDictionary,
-            pixelBufferAttributes as CFDictionary,
-            pool
-        )
-        
-        guard rc == kCVReturnSuccess else {
-            throw CameraError.bufferPoolSetupFailed(rc)
-        }
-    }
+//    func setupPixelBufferPool(prototypeBuffer buffer: CVImageBuffer, pool: UnsafeMutablePointer<CVPixelBufferPool?>) throws {
+//        let width = CVPixelBufferGetWidth(buffer)
+//        let height = CVPixelBufferGetHeight(buffer)
+//        let pixelFormat = CVPixelBufferGetPixelFormatType(buffer)
+//        
+//        let poolAttributes: [String: Any] = [
+//            kCVPixelBufferPoolMinimumBufferCountKey as String: 3
+//        ]
+//        
+//        let pixelBufferAttributes: [String: Any] = [
+//            kCVPixelBufferWidthKey as String: width,
+//            kCVPixelBufferHeightKey as String: height,
+//            kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
+//            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+//        ]
+//        
+//        let rc = CVPixelBufferPoolCreate(
+//            kCFAllocatorDefault,
+//            poolAttributes as CFDictionary,
+//            pixelBufferAttributes as CFDictionary,
+//            pool
+//        )
+//        
+//        guard rc == kCVReturnSuccess else {
+//            throw CameraError.bufferPoolSetupFailed(rc)
+//        }
+//    }
     
 }
 
