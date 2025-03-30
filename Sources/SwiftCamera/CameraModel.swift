@@ -185,17 +185,21 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
         videoOutput.setSampleBufferDelegate(self, queue: queue)
         let (stream, continuation) = AsyncStream<SampleBuffer>.makeStream(bufferingPolicy: .bufferingOldest(1))
         self.sampleContinuation = continuation
+        await MainActor.run {
+            self.isCapturingVideo = true
+        }
         return stream
     }
     
-    public func stopCaptureVideoStream() {
+    public func stopCaptureVideoStream() async {
         self.sampleContinuation?.finish()
         videoOutput?.setSampleBufferDelegate(nil, queue: queue)
+        await MainActor.run {
+            self.isCapturingVideo = false
+        }
     }
     
-    public var isCapturingVideo: Bool {
-        videoOutput?.sampleBufferDelegate != nil
-    }
+    @Published public var isCapturingVideo = false
     
     nonisolated private func handle(buffer: CMSampleBuffer) {
         guard let sampleContinuation else {
