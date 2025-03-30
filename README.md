@@ -1,12 +1,12 @@
-### Usage
+## __Usage__
 
-### CameraModel
+### `CameraModel`
 1. Create a @StateObject instance of  `CameraModel`
 2. Set the inputDevice of the camera model to the camera
 3. Set the outputDevice, options are photo or video
 4. call `start()` on the camera model
 
-### CameraLiveView
+### `CameraLiveView`
 1. A SwiftUI View showing input device live preview of the CameraModel you pass it
 
 ----
