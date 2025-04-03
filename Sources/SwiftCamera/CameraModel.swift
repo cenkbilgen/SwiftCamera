@@ -171,28 +171,37 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     
     public struct SampleBuffer: @unchecked Sendable {
         public let imageBuffer: CVPixelBuffer
+        public let videoRotationAngle: CGFloat
         public let timestamp: CMTime
         
-        init(buffer: CMSampleBuffer) throws {
+        init(buffer: CMSampleBuffer, rotationAngle: CGFloat) throws {
             try buffer.makeDataReady()
             guard let imageBuffer = buffer.imageBuffer else {
                 throw AVError(.contentIsUnavailable)
             }
+            // CVPixelBufferLockBaseAddress(imageBuffer, .readOnly)
             self.imageBuffer = imageBuffer
             self.timestamp = buffer.presentationTimeStamp
+            self.videoRotationAngle = rotationAngle
         }
+        
+        // Locking/Unlocking not necessary if GPU operations
+//        public func release() {
+//            CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly)
+//        }
     }
 
-    
-    public func startCaptureVideoStream() async throws -> AsyncStream<SampleBuffer> {
+    public func startCaptureVideoStream() throws -> AsyncStream<SampleBuffer> {
         guard let videoOutput else {
             throw CameraError.notCurrentCaptureOutputDevice
         }
         videoOutput.setSampleBufferDelegate(self, queue: queue)
         let (stream, continuation) = AsyncStream<SampleBuffer>.makeStream(bufferingPolicy: .bufferingOldest(1))
         self.sampleContinuation = continuation
-        await MainActor.run {
-            self.isCapturingVideo = true
+        Task {
+            await MainActor.run {
+                self.isCapturingVideo = true
+            }
         }
         return stream
     }
@@ -207,12 +216,12 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     
     @Published public var isCapturingVideo = false
     
-    nonisolated private func handle(buffer: CMSampleBuffer) {
+    nonisolated private func handle(buffer: CMSampleBuffer, rotationAngle: CGFloat) {
         guard let sampleContinuation else {
             return
         }
         do {
-            let safeBuffer = try SampleBuffer(buffer: buffer)
+            let safeBuffer = try SampleBuffer(buffer: buffer, rotationAngle: rotationAngle)
             sampleContinuation.yield(safeBuffer)
         } catch {
             print(error.localizedDescription)
@@ -220,12 +229,37 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     }
     
     nonisolated public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        handle(buffer: sampleBuffer)
+        // NOTE: video rotation angle will always be zero
+        handle(buffer: sampleBuffer, rotationAngle: connection.videoRotationAngle)
     }
     
     public func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         print("Dropping samples")
     }
+    
+    // TODO: try to get a better orientation reading, for now it seems like iOS distills all captures to only two value 1 or 6.
+//    func orientation(sampleBuffer: CMSampleBuffer) throws -> CGImagePropertyOrientation {
+    //        let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true) ?? [] as CFArray
+    //        let count = CFArrayGetCount(attachments)
+    //        var key: CFString = kCGImagePropertyOrientation
+    //        var dictionary: UnsafePointer<CFDictionary>? = nil
+    //        if count > 0 {
+    //            dictionary = CFArrayGetValueAtIndex(attachments, 0).assumingMemoryBound(to: CFDictionary.self)
+    //            if let dictionary {
+    //                let orientation = CFDictionaryGetValue(dictionary.pointee, &key)
+    //                print(orientation)
+    //            }
+    //
+            
+    //            if let dictionary = attachment as? [NSString: Any],
+    //               let exifMetadata = dictionary[kCGImagePropertyExifDictionary as NSString] as? [NSString: Any],
+    //               let orientationValue = exifMetadata[kCGImagePropertyOrientation as NSString] as? NSNumber {
+    //                orientation = CGImagePropertyOrientation(rawValue: orientationValue.uint32Value)
+    //            }
+    //        }
+    
+    // NOTE: Not copying buffers over anymore, just ensure they are locked
+    // but keeping this code, in case I change my mind
 
 //    func setupPixelBufferPool(prototypeBuffer buffer: CVImageBuffer, pool: UnsafeMutablePointer<CVPixelBufferPool?>) throws {
 //        let width = CVPixelBufferGetWidth(buffer)
@@ -257,18 +291,3 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     
 }
 
-enum ImageTool {
-    
-    enum Error: Swift.Error {
-        case conversionFailed
-    }
-    
-    static func cgImage(from buffer: CVPixelBuffer) throws -> CGImage {
-       var cgImage: CGImage?
-       VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &cgImage)
-       guard let cgImage else {
-         throw Error.conversionFailed
-       }
-       return cgImage
-     }
-}
