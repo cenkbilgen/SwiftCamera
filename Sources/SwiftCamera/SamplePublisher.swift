@@ -9,7 +9,7 @@
 
 extension CameraModel {
     
-#if XCODE_VERSION >= 1603
+#if swift(>=6.1)
 
     public func startCaptureVideoStreamPublisher() throws -> AnyPublisher<CameraModel.SampleBuffer, Never> {
         let subject = PassthroughSubject<CameraModel.SampleBuffer, Never>()
