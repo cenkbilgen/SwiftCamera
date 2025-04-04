@@ -9,6 +9,8 @@
 
 extension CameraModel {
     
+#if XCODE_VERSION >= 1603
+
     public func startCaptureVideoStreamPublisher() throws -> AnyPublisher<CameraModel.SampleBuffer, Never> {
         let subject = PassthroughSubject<CameraModel.SampleBuffer, Never>()
         Task { [subject] in
@@ -23,4 +25,7 @@ extension CameraModel {
         }
         return subject.eraseToAnyPublisher()
     }
+    
+#endif
+    
 }
