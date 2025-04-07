@@ -9,23 +9,36 @@
 
 extension CameraModel {
     
-#if swift(>=6.1)
+    // NOTE: This function throws, but... if it doesn't throw the publisher it returns does not send any Failure, ie Failure == Never.
 
-    public func startCaptureVideoStreamPublisher() throws -> AnyPublisher<CameraModel.SampleBuffer, Never> {
-        let subject = PassthroughSubject<CameraModel.SampleBuffer, Never>()
-        Task { [subject] in
-            let stream = try self.startCaptureVideoStream()
-            for await sample in stream {
-                if Task.isCancelled {
-                    break
-                }
-                subject.send(sample)
-            }
-            subject.send(completion: .finished)
-        }
-        return subject.eraseToAnyPublisher()
-    }
+    // Basically, two possible failures, 1. Fail on streaming setup (ie no camera session or bad config), 2. Setup does not fail, but camera has errors while streaming (ie dropped frames).
+    // We only catch the first kind, ignore the second.
     
-#endif
+    public func startCaptureVideoStreamPublisher() throws -> AnyPublisher<CameraModel.SampleBuffer, Never> {
+        let stream = try self.startCaptureVideoStream()
+
+        return Deferred {
+            let subject = PassthroughSubject<CameraModel.SampleBuffer, Never>()
+            let task = Task(priority: .userInitiated) {
+                do {
+                    for await sample in stream {
+                        if Task.isCancelled {
+                            break
+                        }
+                        subject.send(sample)
+                    }
+                } catch {
+                    
+                }
+                subject.send(completion: .finished)
+            }
+
+            return subject
+                .handleEvents(receiveCancel: {
+                    task.cancel()
+                })
+        }
+        .eraseToAnyPublisher()
+    }
     
 }
