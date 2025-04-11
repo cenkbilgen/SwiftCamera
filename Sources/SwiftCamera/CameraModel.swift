@@ -68,14 +68,57 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     }
     
     // TODO: just camera hard-coded for now
-    public enum OutputType {
+    public enum OutputType: Hashable {
         case photo
         case video(fps: Double, resolution: AVCaptureSession.Preset)
         // case audio
-    }
-    @Published public var currentOutput: OutputType?
 
-    public func setOutputDevice(type: OutputType) throws {
+//        public func hash(into hasher: inout Hasher) {
+//            hasher.combine(self)
+//        }
+        
+        public var avOutputType: AVCaptureOutput {
+            switch self {
+            case .photo: AVCapturePhotoOutput()
+            case .video(fps: _, resolution: _): {
+                let output = AVCaptureVideoDataOutput()
+                output.alwaysDiscardsLateVideoFrames = true
+                return output
+            }()
+            }
+        }
+        
+        public var isVideo: Bool {
+            switch self {
+            case .video(fps: _, resolution: _): true
+            default: false
+            }
+        }
+    }
+    
+    @Published var currentVideoOutputType: OutputType?
+    
+    public func removePhotoOutput() {
+        
+        self.photoOutput = nil
+    }
+    
+    public func removeVideoOutput() {
+        session.beginConfiguration()
+        defer {
+            session.commitConfiguration()
+        }
+        guard let output = session.outputs.first(where: {
+            $0 is AVCaptureVideoDataOutput
+        }) else {
+            return
+        }
+        session.removeOutput(output)
+        self.videoOutput = nil
+        currentVideoOutputType = nil
+    }
+
+    public func addOutputDevice(type: OutputType) throws {
         session.beginConfiguration()
         defer {
             session.commitConfiguration()
@@ -83,19 +126,26 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
         
         switch type {
         case .photo:
-            let output = AVCapturePhotoOutput()
+            let output = type.avOutputType
             guard session.canAddOutput(output) else {
                 throw CameraError.invalidOutputDevice(output.debugDescription)
             }
-            self.videoOutput = nil
-            self.photoOutput = output
+            self.photoOutput = output as? AVCapturePhotoOutput
             session.addOutput(output)
-            self.currentOutput = .photo
             
         case .video(let fps, let resolution):
+            
+            let output = type.avOutputType
+            if let currentVideoOutputType {
+                if currentVideoOutputType == type {
+                    return
+                } else {
+                    removeVideoOutput()
+                }
+            }
+            
             session.sessionPreset = resolution
-            let output = AVCaptureVideoDataOutput()
-            output.alwaysDiscardsLateVideoFrames = true
+            
             if let device = session.inputs.first as? AVCaptureDeviceInput {
                 try device.device.lockForConfiguration()
                 device.device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
@@ -104,10 +154,9 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
             guard session.canAddOutput(output) else {
                 throw CameraError.invalidOutputDevice(videoOutput.debugDescription)
             }
-            self.photoOutput = nil
-            self.videoOutput = output
+            self.videoOutput = output as? AVCaptureVideoDataOutput
             session.addOutput(output)
-            self.currentOutput = .video(fps: fps, resolution: resolution)
+            self.currentVideoOutputType = type
             
 //        case .audio:
 //            let audioOutput = AVCaptureAudioDataOutput()
@@ -140,7 +189,7 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
     
     public func capturePhoto(type: AVVideoCodecType? = .jpeg) async throws -> Data {
         guard let photoOutput else {
-            throw CameraError.notCurrentCaptureOutputDevice
+            throw CameraError.outputDeviceNotConnected
         }
         return try await withCheckedThrowingContinuation { [photoOutput] continuation in
             self.dataContinuation = continuation
@@ -193,7 +242,7 @@ final public class CameraModel: NSObject, ObservableObject, AVCapturePhotoCaptur
 
     public func startCaptureVideoStream() throws -> AsyncStream<SampleBuffer> {
         guard let videoOutput else {
-            throw CameraError.notCurrentCaptureOutputDevice
+            throw CameraError.outputDeviceNotConnected
         }
         videoOutput.setSampleBufferDelegate(self, queue: queue)
         let (stream, continuation) = AsyncStream<SampleBuffer>.makeStream(bufferingPolicy: .bufferingOldest(1))

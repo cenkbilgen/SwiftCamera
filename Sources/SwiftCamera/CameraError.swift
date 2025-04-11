@@ -16,6 +16,6 @@ public enum CameraError: Error {
     case processingTimeOut
     case invalidInputDevice(String)
     case invalidOutputDevice(String)
-    case notCurrentCaptureOutputDevice
+    case outputDeviceNotConnected
     case bufferPoolSetupFailed(CVReturn)
 }
