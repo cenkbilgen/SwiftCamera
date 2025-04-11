@@ -14,7 +14,7 @@ extension CameraModel {
     // Basically, two possible failures, 1. Fail on streaming setup (ie no camera session or bad config), 2. Setup does not fail, but camera has errors while streaming (ie dropped frames).
     // We only catch the first kind, ignore the second.
     
-    public func startCaptureVideoStreamPublisher() throws -> AnyPublisher<CameraModel.SampleBuffer, Never> {
+    nonisolated public func startCaptureVideoStreamPublisher() throws -> AnyPublisher<CameraModel.SampleBuffer, Never> {
         let stream = try self.startCaptureVideoStream()
 
         return Deferred {
